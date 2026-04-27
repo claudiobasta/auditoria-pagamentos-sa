@@ -285,18 +285,20 @@ with tab3:
 # ----- ABA 4: SOBREPOSIÇÃO -----
 with tab4:
     if sobreposicao.empty:
-        st.success('✅ Nenhuma sobreposição detectada (mesmo profissional em tarefas diferentes no mesmo dia).')
+        st.success('✅ Nenhuma sobreposição detectada.')
     else:
         st.markdown(
-            'Profissionais com lançamentos em **tarefas diferentes na mesma data**. '
-            'Pode ser legítimo (algumas funções permitem) ou erro de lançamento — confira.'
+            'Mesmo profissional com **a mesma despesa lançada em tarefas diferentes no mesmo dia**. '
+            'Não pode acontecer — provável erro de lançamento. Marque as linhas que devem ser removidas.'
         )
-        for (cpf, data), grupo in sobreposicao.groupby(['_cpf_digits', '_data_despesa']):
+        for (cpf, data, tipo), grupo in sobreposicao.groupby(['_cpf_digits', '_data_despesa', 'Tipo de Despesa']):
             if grupo.empty:
                 continue
             nome = grupo['Nome do profissional'].iloc[0] if 'Nome do profissional' in grupo.columns else '—'
             data_str = pd.Timestamp(data).strftime('%d/%m/%Y') if pd.notna(data) else '—'
-            with st.expander(f'{nome} — {data_str} ({grupo["Código da tarefa"].nunique()} tarefas)'):
+            with st.expander(
+                f'{nome} — {data_str} | **{tipo}** ({grupo["Código da tarefa"].nunique()} tarefas)'
+            ):
                 for _, linha in grupo.iterrows():
                     idx = linha['_idx']
                     cols = st.columns([1, 5])
@@ -310,7 +312,7 @@ with tab4:
                     else:
                         st.session_state.remover_indices.discard(idx)
                     cols[1].write(
-                        f'`{linha["Código da tarefa"]}` | {linha["Tipo de Despesa"]} | '
+                        f'`{linha["Código da tarefa"]}` | '
                         f'R$ {linha["_valor_num"]:.2f} | Cliente: {linha.get("Cliente", "—")}'
                     )
  
@@ -403,3 +405,4 @@ if st.button('✨ Gerar arquivo Pagamentos - Equipe Externa', type='primary', us
         type='primary',
         use_container_width=True,
     )
+ 
