@@ -375,3 +375,111 @@ def montar_pagamentos(df_limpo, cadastro_df, semana_label, data_registro,
             'Departamento (100%)': departamento,
         })
     return pd.DataFrame(linhas)
+ 
+ 
+# ============================================================
+# CRUZAMENTO COM A ESCALA
+# ============================================================
+ 
+# Status_ee da escala que indicam que o profissional efetivamente trabalhou
+# (e portanto deve receber diária)
+STATUS_TRABALHADOS = [
+    'Pronto P/ Faturamento',
+    'Checkout Efetuado',
+    'Em Execução',
+    'Em validação',
+]
+ 
+# Tipos de despesa do relatório que correspondem a uma "diária"
+# (1 diária por dia por profissional, independente de quantas tarefas)
+TIPOS_DIARIA = [
+    'Diária T + VT + VA',
+    'Diária A + VT + VA',
+    'Diária M + VT + VA',
+    'Adicional de diária',
+    'Ajuda de custo',
+    'Ajuda de custo para Motorista',
+]
+ 
+ 
+def carregar_escala(arquivo):
+    """
+    Carrega arquivo de escala (Escala_fin.xlsx ou csv).
+    Espera as colunas: cpf, nome_completo, inicio, status_ee, codigo, at_cliente.razao_social
+    """
+    nome = getattr(arquivo, 'name', str(arquivo)).lower()
+    if nome.endswith('.csv'):
+        df = pd.read_csv(arquivo, encoding='utf-8', sep=None, engine='python')
+    else:
+        df = pd.read_excel(arquivo)
+ 
+    df.columns = [str(c).lstrip('\ufeff').strip() for c in df.columns]
+ 
+    obrig = ['cpf', 'inicio', 'status_ee']
+    faltam = [c for c in obrig if c not in df.columns]
+    if faltam:
+        raise ValueError(
+            f'Arquivo de Escala está com colunas faltando: {", ".join(faltam)}.\n'
+            f'Colunas encontradas: {", ".join(df.columns[:10])}...'
+        )
+ 
+    df['_cpf_digits'] = df['cpf'].apply(cpf_digits)
+    # 'inicio' pode vir como string ISO UTC ou Timestamp
+    df['_data'] = pd.to_datetime(df['inicio'], errors='coerce', utc=True)
+    if df['_data'].notna().any():
+        df['_data'] = df['_data'].dt.tz_localize(None)
+    df['_data'] = df['_data'].dt.date
+    return df
+ 
+ 
+def cruzar_escala_pagamento(df_relatorio, df_escala, data_inicio, data_fim,
+                             status_validos=None):
+    """
+    Faz o cruzamento entre escalas trabalhadas e diárias do relatório,
+    no range [data_inicio, data_fim].
+ 
+    Retorna dois DataFrames:
+      - escalas_sem_diaria: profissional escalado/trabalhou no período mas
+        não tem diária no relatório → pagamento faltando
+      - diarias_sem_escala: diária no relatório mas sem escala válida no
+        período → pagamento indevido (ou escala incompleta)
+    """
+    if status_validos is None:
+        status_validos = STATUS_TRABALHADOS
+ 
+    # 1) Escalas válidas no período
+    esc = df_escala.copy()
+    esc = esc[esc['status_ee'].isin(status_validos)]
+    esc = esc[esc['_data'].notna()]
+    esc = esc[(esc['_data'] >= data_inicio) & (esc['_data'] <= data_fim)]
+    esc = esc[esc['_cpf_digits'] != '']
+ 
+    # Reduzir para 1 linha por (CPF, data) — mantém info de tarefa/cliente p/ exibir
+    esc_unica = esc.drop_duplicates(subset=['_cpf_digits', '_data'], keep='first').copy()
+    chaves_escala = set(zip(esc_unica['_cpf_digits'], esc_unica['_data']))
+ 
+    # 2) Diárias do relatório no período
+    rel = df_relatorio.copy()
+    rel = rel[rel['Tipo de Despesa'].isin(TIPOS_DIARIA)]
+    rel = rel[rel['_data_despesa'].notna()]
+    rel['_data_only'] = pd.to_datetime(rel['_data_despesa']).dt.date
+    rel = rel[(rel['_data_only'] >= data_inicio) & (rel['_data_only'] <= data_fim)]
+    rel = rel[rel['_cpf_digits'] != '']
+ 
+    chaves_relatorio = set(zip(rel['_cpf_digits'], rel['_data_only']))
+ 
+    # 3) Diferenças
+    falta_pagar_keys = chaves_escala - chaves_relatorio
+    pago_sem_escala_keys = chaves_relatorio - chaves_escala
+ 
+    # 4) Escalas sem diária (faltando pagar)
+    escalas_sem_diaria = esc_unica[
+        esc_unica.apply(lambda r: (r['_cpf_digits'], r['_data']) in falta_pagar_keys, axis=1)
+    ].copy()
+ 
+    # 5) Diárias sem escala (pago indevido)
+    diarias_sem_escala = rel[
+        rel.apply(lambda r: (r['_cpf_digits'], r['_data_only']) in pago_sem_escala_keys, axis=1)
+    ].copy()
+ 
+    return escalas_sem_diaria, diarias_sem_escala
