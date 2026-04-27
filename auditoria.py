@@ -6,8 +6,8 @@ import pandas as pd
 import numpy as np
 import re
 from datetime import datetime, timedelta
-
-
+ 
+ 
 # ============================================================
 # MAPEAMENTO FIXO: Tipo de Despesa -> Categoria Financeira
 # (extraído da aba "Categorias" da Planilha - Financeiro)
@@ -29,12 +29,12 @@ CATEGORIA_MAP = {
     'Alimentação': 'DV - Alimentação',
     'Retirada de Doses': 'Diárias - Equipe externa',
 }
-
-
+ 
+ 
 # ============================================================
 # UTILITÁRIOS DE FORMATAÇÃO
 # ============================================================
-
+ 
 def parse_valor(s):
     """Converte 'R$1.234,56' -> 1234.56"""
     if pd.isna(s):
@@ -47,8 +47,8 @@ def parse_valor(s):
         return float(s)
     except (ValueError, TypeError):
         return 0.0
-
-
+ 
+ 
 def formatar_cpf(cpf):
     """Recebe CPF (string ou numérico) e devolve no formato 000.000.000-00."""
     if pd.isna(cpf) or cpf is None:
@@ -60,16 +60,16 @@ def formatar_cpf(cpf):
     if len(cpf_str) != 11:
         return str(cpf)
     return f'{cpf_str[:3]}.{cpf_str[3:6]}.{cpf_str[6:9]}-{cpf_str[9:]}'
-
-
+ 
+ 
 def cpf_digits(cpf):
     """Retorna apenas dígitos do CPF, sempre 11 chars."""
     if pd.isna(cpf) or cpf is None:
         return ''
     s = ''.join(filter(str.isdigit, str(cpf)))
     return s.zfill(11)[:11] if s else ''
-
-
+ 
+ 
 def validar_cpf(cpf):
     """Valida CPF pelos dígitos verificadores."""
     cpf_str = cpf_digits(cpf)
@@ -82,8 +82,8 @@ def validar_cpf(cpf):
     soma = sum(int(cpf_str[i]) * (11 - i) for i in range(10))
     d2 = (soma * 10 % 11) % 10
     return d2 == int(cpf_str[10])
-
-
+ 
+ 
 def parse_data(s):
     if pd.isna(s):
         return pd.NaT
@@ -93,8 +93,8 @@ def parse_data(s):
         return pd.to_datetime(s, dayfirst=True, errors='coerce')
     except Exception:
         return pd.NaT
-
-
+ 
+ 
 def formatar_pix(valor, tipo):
     """
     Formata a chave PIX de acordo com o tipo:
@@ -106,7 +106,7 @@ def formatar_pix(valor, tipo):
         return ''
     valor_str = str(valor).strip()
     tipo_norm = (str(tipo) if not pd.isna(tipo) else '').lower()
-
+ 
     if 'telefone' in tipo_norm or 'celular' in tipo_norm:
         digits = ''.join(filter(str.isdigit, valor_str))
         if not digits:
@@ -121,62 +121,112 @@ def formatar_pix(valor, tipo):
             return formatar_cpf(digits)
         return valor_str
     return valor_str  # email, aleatória
-
-
+ 
+ 
 # ============================================================
 # CARGA
 # ============================================================
-
+ 
+RELATORIO_COLS_OBRIG = ['Valor', 'CPF', 'Nome do profissional', 'Tipo de Despesa',
+                        'Código da tarefa', 'Data da despesa', 'id_despesa']
+ 
+CADASTRO_COLS_OBRIG = ['Chave PIX', 'Número do CPF', 'Tipo de chave PIX']
+ 
+ 
+def _ler_csv_robusto(arquivo):
+    """Lê CSV tentando encodings comuns (utf-8 com/sem BOM, latin-1)."""
+    for enc in ('utf-8-sig', 'utf-8', 'latin-1', 'cp1252'):
+        try:
+            arquivo.seek(0) if hasattr(arquivo, 'seek') else None
+            df = pd.read_csv(arquivo, encoding=enc, sep=None, engine='python')
+            # Limpa BOM eventual no nome da primeira coluna
+            df.columns = [c.lstrip('\ufeff').strip() for c in df.columns]
+            return df
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    raise ValueError('Não foi possível ler o CSV (encoding não suportado).')
+ 
+ 
 def carregar_relatorio(arquivo):
     """Carrega CSV do Bubble e adiciona colunas auxiliares."""
-    df = pd.read_csv(arquivo, encoding='utf-8', sep=None, engine='python')
+    df = _ler_csv_robusto(arquivo)
+ 
+    faltam = [c for c in RELATORIO_COLS_OBRIG if c not in df.columns]
+    if faltam:
+        raise ValueError(
+            f'Arquivo do Relatório está com colunas faltando: {", ".join(faltam)}.\n\n'
+            f'Colunas encontradas: {", ".join(df.columns[:8])}...\n\n'
+            f'Verifique se você subiu o CSV correto no campo "Relatório (CSV)" '
+            f'(o arquivo exportado do Bubble com despesas pendentes de pagamento).'
+        )
+ 
     df['_valor_num'] = df['Valor'].apply(parse_valor)
     df['_cpf_digits'] = df['CPF'].apply(cpf_digits)
     df['_cpf_fmt'] = df['CPF'].apply(formatar_cpf)
     df['_data_despesa'] = df['Data da despesa'].apply(parse_data)
-    df['_idx'] = df.index  # índice estável para revisão manual
+    df['_idx'] = df.index
     return df
-
-
+ 
+ 
 def carregar_cadastro(arquivo):
     """
     Carrega cadastro _EXT_ Profissional. Aceita xlsx ou csv.
-    Espera colunas: 'Chave PIX', 'Nome completo', 'Número do CPF',
-                    'Tipo de chave PIX', 'Fórmula (Correção de PIX)'
+    Espera colunas: 'Chave PIX', 'Nome completo', 'Número do CPF', 'Tipo de chave PIX'.
+    A coluna 'Fórmula (Correção de PIX)' é opcional - se não existir,
+    a chave PIX é formatada na hora a partir de 'Chave PIX' + 'Tipo de chave PIX'.
     """
     nome = getattr(arquivo, 'name', str(arquivo)).lower()
     if nome.endswith('.csv'):
-        df = pd.read_csv(arquivo, encoding='utf-8', sep=None, engine='python')
+        df = _ler_csv_robusto(arquivo)
     else:
-        # Pode ser uma sheet específica ou a primeira
         try:
             df = pd.read_excel(arquivo, sheet_name='_EXT_ Profissional')
         except Exception:
             df = pd.read_excel(arquivo)
-
-    df['_cpf_digits'] = df['Número do CPF'].apply(cpf_digits) if 'Número do CPF' in df.columns else ''
+        df.columns = [str(c).lstrip('\ufeff').strip() for c in df.columns]
+ 
+    faltam = [c for c in CADASTRO_COLS_OBRIG if c not in df.columns]
+    if faltam:
+        raise ValueError(
+            f'Arquivo do Cadastro está com colunas faltando: {", ".join(faltam)}.\n\n'
+            f'Colunas encontradas: {", ".join(df.columns[:8])}...\n\n'
+            f'Verifique se você subiu o cadastro _EXT_ Profissional correto '
+            f'no campo "Cadastro" (não o relatório de despesas).'
+        )
+ 
+    df['_cpf_digits'] = df['Número do CPF'].apply(cpf_digits)
     return df
-
-
+ 
+ 
 def lookup_pix_cadastro(cpf_digits_value, cadastro_df):
-    """Busca chave PIX formatada do cadastro pelo CPF."""
+    """
+    Busca chave PIX formatada do cadastro pelo CPF.
+    Se houver coluna 'Fórmula (Correção de PIX)' usa direto;
+    caso contrário, formata na hora a partir de 'Chave PIX' + 'Tipo de chave PIX'.
+    """
     if not cpf_digits_value or cadastro_df is None or cadastro_df.empty:
         return None, None
     match = cadastro_df[cadastro_df['_cpf_digits'] == cpf_digits_value]
     if match.empty:
         return None, None
     row = match.iloc[0]
-    pix = row.get('Fórmula (Correção de PIX)') or row.get('Chave PIX')
     tipo = row.get('Tipo de chave PIX')
-    if pd.isna(pix):
-        return None, None
-    return str(pix).strip(), str(tipo).strip() if not pd.isna(tipo) else None
-
-
+    tipo = str(tipo).strip() if not pd.isna(tipo) else None
+ 
+    pix_formula = row.get('Fórmula (Correção de PIX)') if 'Fórmula (Correção de PIX)' in cadastro_df.columns else None
+    pix_bruto = row.get('Chave PIX')
+ 
+    if pix_formula is not None and not pd.isna(pix_formula) and str(pix_formula).strip():
+        return str(pix_formula).strip(), tipo
+    if pix_bruto is not None and not pd.isna(pix_bruto) and str(pix_bruto).strip():
+        return formatar_pix(pix_bruto, tipo), tipo
+    return None, None
+ 
+ 
 # ============================================================
 # AUDITORIA - REGRAS
 # ============================================================
-
+ 
 def detectar_duplicatas_exatas(df):
     """
     Duplicatas EXATAS: mesmo id_despesa.
@@ -186,8 +236,8 @@ def detectar_duplicatas_exatas(df):
         return []
     duplicadas = df[df.duplicated(subset=['id_despesa'], keep='first')]
     return duplicadas.index.tolist()
-
-
+ 
+ 
 def detectar_duplicatas_suspeitas(df):
     """
     Suspeitas: mesmo CPF + Código da tarefa + Tipo de Despesa + Valor.
@@ -201,36 +251,51 @@ def detectar_duplicatas_suspeitas(df):
     suspeitas['_grupo_dup'] = suspeitas.groupby(chave).ngroup() + 1
     grupos = sorted(suspeitas['_grupo_dup'].unique().tolist())
     return suspeitas, grupos
-
-
+ 
+ 
 def detectar_sobreposicao_tarefas(df):
     """
-    Mesmo profissional em tarefas diferentes na mesma data.
-    Pode indicar erro de lançamento (não dá pra estar em 2 lugares ao mesmo tempo).
+    Sobreposição: mesmo profissional + mesma data + mesmo TIPO de despesa
+    em tarefas DIFERENTES.
+ 
+    Exemplo: duas Diárias T+VT+VA em tarefas distintas no mesmo dia → sobreposição.
+    Já uma Diária + um Pernoite + um Pedágio no mesmo dia em tarefas diferentes
+    é NORMAL (despesas distintas que ocorrem juntas).
     """
-    grupos = df.dropna(subset=['_cpf_digits', 'Código da tarefa', '_data_despesa']).copy()
-    grupos = grupos[grupos['_cpf_digits'] != '']
+    base = df.dropna(subset=['_cpf_digits', 'Código da tarefa', '_data_despesa', 'Tipo de Despesa']).copy()
+    base = base[base['_cpf_digits'] != '']
+    if base.empty:
+        return pd.DataFrame()
+ 
     cont = (
-        grupos.groupby(['_cpf_digits', '_data_despesa'])['Código da tarefa']
+        base.groupby(['_cpf_digits', '_data_despesa', 'Tipo de Despesa'])['Código da tarefa']
         .nunique()
         .reset_index(name='qtd_tarefas')
     )
     suspeitos = cont[cont['qtd_tarefas'] > 1]
     if suspeitos.empty:
         return pd.DataFrame()
-    chaves = set(zip(suspeitos['_cpf_digits'], suspeitos['_data_despesa']))
-    mask = grupos.apply(lambda r: (r['_cpf_digits'], r['_data_despesa']) in chaves, axis=1)
-    return grupos[mask].sort_values(['_cpf_digits', '_data_despesa', 'Código da tarefa'])
-
-
+ 
+    chaves = set(zip(
+        suspeitos['_cpf_digits'],
+        suspeitos['_data_despesa'],
+        suspeitos['Tipo de Despesa'],
+    ))
+    mask = base.apply(
+        lambda r: (r['_cpf_digits'], r['_data_despesa'], r['Tipo de Despesa']) in chaves,
+        axis=1,
+    )
+    return base[mask].sort_values(['_cpf_digits', '_data_despesa', 'Tipo de Despesa', 'Código da tarefa'])
+ 
+ 
 def detectar_cpfs_invalidos(df):
     df = df.copy()
     df['_cpf_valido'] = df['_cpf_digits'].apply(validar_cpf)
     invalidos = df[~df['_cpf_valido'] & (df['_cpf_digits'] != '')]
     sem_cpf = df[df['_cpf_digits'] == '']
     return invalidos, sem_cpf
-
-
+ 
+ 
 def detectar_pix_faltante(df, cadastro_df):
     """Linhas sem PIX no relatório - tenta achar no cadastro."""
     sem_pix = df[df['Chave PIX'].isna() | (df['Chave PIX'].astype(str).str.strip() == '')].copy()
@@ -239,14 +304,14 @@ def detectar_pix_faltante(df, cadastro_df):
         sem_pix['_pix_tipo_cadastro'] = None
         sem_pix['_pix_resolvido'] = False
         return sem_pix
-
+ 
     pix_lookup = sem_pix['_cpf_digits'].apply(lambda c: lookup_pix_cadastro(c, cadastro_df))
     sem_pix['_pix_cadastro'] = pix_lookup.apply(lambda x: x[0])
     sem_pix['_pix_tipo_cadastro'] = pix_lookup.apply(lambda x: x[1])
     sem_pix['_pix_resolvido'] = sem_pix['_pix_cadastro'].notna()
     return sem_pix
-
-
+ 
+ 
 def detectar_outros_problemas(df):
     """Outros sinais de alerta operacionais."""
     problemas = {}
@@ -255,19 +320,19 @@ def detectar_outros_problemas(df):
     problemas['sem_cliente'] = df[df['Cliente'].isna()]
     problemas['sem_codigo_tarefa'] = df[df['Código da tarefa'].isna() | (df['Código da tarefa'].astype(str).str.strip() == '')]
     return problemas
-
-
+ 
+ 
 # ============================================================
 # CONSTRUÇÃO DO ARQUIVO FINAL
 # ============================================================
-
+ 
 def numero_semana_iso(data):
     """Retorna 'Semana N' baseado na semana ISO."""
     if pd.isna(data):
         return ''
     return f'Semana {data.isocalendar().week}'
-
-
+ 
+ 
 def montar_pagamentos(df_limpo, cadastro_df, semana_label, data_registro,
                        data_vencimento, departamento='Equipe externa',
                        overrides_pix=None):
@@ -281,10 +346,10 @@ def montar_pagamentos(df_limpo, cadastro_df, semana_label, data_registro,
         cpf_fmt = r['_cpf_fmt']
         nome = str(r.get('Nome do profissional', '')).strip()
         fornecedor = f'{nome},{cpf_fmt}' if cpf_fmt else nome
-
+ 
         tipo_despesa = str(r.get('Tipo de Despesa', '')).strip()
         categoria = CATEGORIA_MAP.get(tipo_despesa, tipo_despesa)
-
+ 
         # Chave PIX: 1) override do usuário, 2) cadastro (se faltava), 3) original formatada
         pix_original = r.get('Chave PIX')
         tipo_pix = r.get('Tipo da Chave PIX')
@@ -297,7 +362,7 @@ def montar_pagamentos(df_limpo, cadastro_df, semana_label, data_registro,
             pix_final = pix_cad if pix_cad else ''
         else:
             pix_final = formatar_pix(pix_original, tipo_pix)
-
+ 
         linhas.append({
             'Semanas': semana_label,
             'Fornecedor * (Razão Social, Nome Fantasia, CNPJ ou CPF)': fornecedor,
