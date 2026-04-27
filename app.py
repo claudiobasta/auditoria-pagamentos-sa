@@ -14,12 +14,13 @@ from datetime import date, timedelta
 from io import BytesIO
  
 from auditoria import (
-    carregar_relatorio, carregar_cadastro,
+    carregar_relatorio, carregar_cadastro, carregar_escala,
     detectar_duplicatas_exatas, detectar_duplicatas_suspeitas,
     detectar_sobreposicao_tarefas, detectar_cpfs_invalidos,
     detectar_pix_faltante, detectar_outros_problemas,
     montar_pagamentos, numero_semana_iso,
     formatar_pix, lookup_pix_cadastro,
+    cruzar_escala_pagamento, STATUS_TRABALHADOS,
 )
 from exportador import gerar_xlsx_financeiro
  
@@ -71,10 +72,31 @@ with st.sidebar:
         type=['xlsx', 'xls', 'csv'],
         help='Versão mais recente do cadastro de profissionais externos.',
     )
+    arq_escala = st.file_uploader(
+        'Escala (XLSX ou CSV) — opcional',
+        type=['xlsx', 'xls', 'csv'],
+        help='Base de escalas (ex.: Escala_fin.xlsx) para cruzar com diárias pagas.',
+    )
  
     st.divider()
-    st.header('⚙️ Parâmetros')
+    st.header('📅 Período de pagamento')
     hoje = date.today()
+    # Range padrão: semana ISO atual (segunda a domingo)
+    seg = hoje - timedelta(days=hoje.weekday())
+    dom = seg + timedelta(days=6)
+    range_pgto = st.date_input(
+        'Diárias de até',
+        value=(seg, dom),
+        help='Range de datas das diárias que estão sendo pagas nesta rodada. '
+             'O cruzamento com a escala usa esse mesmo período.',
+    )
+    if isinstance(range_pgto, tuple) and len(range_pgto) == 2:
+        data_ini_pgto, data_fim_pgto = range_pgto
+    else:
+        data_ini_pgto, data_fim_pgto = seg, dom
+ 
+    st.divider()
+    st.header('⚙️ Parâmetros do financeiro')
     data_registro = st.date_input('Data de Registro', value=hoje)
     data_vencimento = st.date_input(
         'Data de Vencimento',
@@ -131,6 +153,15 @@ except Exception as e:
     st.error(f'Erro inesperado ao carregar arquivos: {e}')
     st.stop()
  
+# Escala (opcional)
+escala = None
+escala_erro = None
+if arq_escala is not None:
+    try:
+        escala = carregar_escala(arq_escala)
+    except Exception as e:
+        escala_erro = str(e)
+ 
 # Auto-remoção de duplicatas exatas
 indices_dup_exatas = detectar_duplicatas_exatas(df)
 df_sem_dup_exatas = df.drop(index=indices_dup_exatas)
@@ -141,6 +172,14 @@ sobreposicao = detectar_sobreposicao_tarefas(df_sem_dup_exatas)
 invalidos, sem_cpf = detectar_cpfs_invalidos(df_sem_dup_exatas)
 sem_pix = detectar_pix_faltante(df_sem_dup_exatas, cadastro)
 outros = detectar_outros_problemas(df_sem_dup_exatas)
+ 
+# Cruzamento com a escala (se foi carregada)
+escalas_sem_diaria = pd.DataFrame()
+diarias_sem_escala = pd.DataFrame()
+if escala is not None:
+    escalas_sem_diaria, diarias_sem_escala = cruzar_escala_pagamento(
+        df_sem_dup_exatas, escala, data_ini_pgto, data_fim_pgto
+    )
  
 pix_resolvidos_auto = int(sem_pix['_pix_resolvido'].sum()) if not sem_pix.empty else 0
 pix_nao_resolvidos = len(sem_pix) - pix_resolvidos_auto
@@ -162,11 +201,21 @@ st.divider()
 # ============================================================
 # ABAS DE AUDITORIA
 # ============================================================
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+if escala_erro:
+    st.warning(f'⚠️ Escala não carregada: {escala_erro}')
+ 
+# Label dinâmico da aba escala
+if escala is not None:
+    label_escala = f'🗓️ Escala × Pagamento ({len(escalas_sem_diaria)} faltam / {len(diarias_sem_escala)} indevidos)'
+else:
+    label_escala = '🗓️ Escala × Pagamento (não carregada)'
+ 
+tab1, tab2, tab3, tab4, tab_esc, tab5, tab6 = st.tabs([
     f'⚠️ Duplicatas suspeitas ({len(suspeitas)})',
     f'🆔 CPF ({len(invalidos)} inv. / {len(sem_cpf)} sem)',
     f'🔑 PIX faltante ({pix_nao_resolvidos} pendentes)',
     f'📅 Sobreposição ({len(sobreposicao)})',
+    label_escala,
     f'🚨 Outros alertas',
     '👀 Pré-visualizar dados completos',
 ])
@@ -316,6 +365,80 @@ with tab4:
                         f'R$ {linha["_valor_num"]:.2f} | Cliente: {linha.get("Cliente", "—")}'
                     )
  
+# ----- ABA ESCALA × PAGAMENTO -----
+with tab_esc:
+    if escala is None:
+        st.info(
+            '📥 Suba o arquivo de **Escala** na barra lateral para ativar o cruzamento.\n\n'
+            'O cruzamento valida, no período de pagamento informado, se cada profissional escalado '
+            '(status indicando trabalho realizado) tem a respectiva diária no relatório — e vice-versa.'
+        )
+    else:
+        st.caption(
+            f'Período cruzado: **{data_ini_pgto.strftime("%d/%m/%Y")}** a '
+            f'**{data_fim_pgto.strftime("%d/%m/%Y")}**  •  '
+            f'Status considerados como "trabalhou": {", ".join(STATUS_TRABALHADOS)}'
+        )
+ 
+        c_a, c_b = st.columns(2)
+        c_a.metric('🔴 Faltam pagar', len(escalas_sem_diaria))
+        c_b.metric('🟡 Pago sem escala', len(diarias_sem_escala))
+ 
+        # ----- FALTANDO PAGAR -----
+        st.markdown('### 🔴 Escalas sem diária no relatório (faltando pagar)')
+        if escalas_sem_diaria.empty:
+            st.success('✅ Todas as escalas trabalhadas no período têm diária correspondente.')
+        else:
+            st.caption(
+                'Profissional **escalado e com status de trabalho realizado** no período, '
+                'mas **sem diária** no relatório. Pode ser pagamento esquecido ou escala '
+                'que será paga em outra rodada.'
+            )
+            cols_falta = ['nome_completo', '_data', 'codigo', 'status_ee', 'at_cliente.razao_social']
+            cols_falta = [c for c in cols_falta if c in escalas_sem_diaria.columns]
+            df_falta = escalas_sem_diaria[cols_falta].copy()
+            df_falta['_data'] = pd.to_datetime(df_falta['_data']).dt.strftime('%d/%m/%Y')
+            df_falta = df_falta.rename(columns={
+                'nome_completo': 'Profissional',
+                '_data': 'Data',
+                'codigo': 'Código da escala',
+                'status_ee': 'Status',
+                'at_cliente.razao_social': 'Cliente',
+            })
+            st.dataframe(df_falta, use_container_width=True, hide_index=True)
+ 
+        # ----- PAGO SEM ESCALA -----
+        st.markdown('### 🟡 Diárias sem escala válida (pagamento indevido?)')
+        if diarias_sem_escala.empty:
+            st.success('✅ Toda diária paga tem escala válida no período.')
+        else:
+            st.caption(
+                'Diária no relatório **sem escala correspondente** no período. '
+                'Pode ser erro de lançamento, escala fora do range ou status que não conta como trabalhado. '
+                'Marque para remover do pagamento se for indevido.'
+            )
+            for _, linha in diarias_sem_escala.iterrows():
+                idx = linha['_idx']
+                cols = st.columns([1, 5])
+                marcado = cols[0].checkbox(
+                    'Remover',
+                    value=(idx in st.session_state.remover_indices),
+                    key=f'rem_esc_{idx}',
+                )
+                if marcado:
+                    st.session_state.remover_indices.add(idx)
+                else:
+                    st.session_state.remover_indices.discard(idx)
+                data_d = linha.get('_data_only')
+                data_str = pd.Timestamp(data_d).strftime('%d/%m/%Y') if pd.notna(data_d) else '—'
+                cols[1].write(
+                    f'**{linha.get("Nome do profissional", "—")}** — {data_str} | '
+                    f'`{linha.get("Código da tarefa", "—")}` | '
+                    f'{linha.get("Tipo de Despesa", "—")} | '
+                    f'R$ {linha["_valor_num"]:.2f} | '
+                    f'Cliente: {linha.get("Cliente", "—")}'
+                )
+ 
 # ----- ABA 5: OUTROS ALERTAS -----
 with tab5:
     cols_show = ['Nome do profissional', 'Código da tarefa', 'Tipo de Despesa', 'Valor', 'Cliente']
@@ -405,4 +528,3 @@ if st.button('✨ Gerar arquivo Pagamentos - Equipe Externa', type='primary', us
         type='primary',
         use_container_width=True,
     )
- 
