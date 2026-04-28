@@ -19,7 +19,7 @@ from auditoria import (
     detectar_sobreposicao_tarefas, detectar_cpfs_invalidos,
     detectar_pix_faltante, detectar_outros_problemas,
     montar_pagamentos, numero_semana_iso,
-    formatar_pix, lookup_pix_cadastro,
+    formatar_pix, formatar_cpf, lookup_pix_cadastro,
     cruzar_escala_pagamento, STATUS_TRABALHADOS,
 )
 from exportador import gerar_xlsx_financeiro
@@ -394,12 +394,15 @@ with tab_esc:
                 'mas **sem diária** no relatório. Pode ser pagamento esquecido ou escala '
                 'que será paga em outra rodada.'
             )
-            cols_falta = ['nome_completo', '_data', 'codigo', 'status_ee', 'at_cliente.razao_social']
-            cols_falta = [c for c in cols_falta if c in escalas_sem_diaria.columns]
-            df_falta = escalas_sem_diaria[cols_falta].copy()
+            df_falta = escalas_sem_diaria.copy()
+            df_falta['_cpf_fmt'] = df_falta['_cpf_digits'].apply(formatar_cpf)
             df_falta['_data'] = pd.to_datetime(df_falta['_data']).dt.strftime('%d/%m/%Y')
-            df_falta = df_falta.rename(columns={
+ 
+            cols_falta = ['nome_completo', '_cpf_fmt', '_data', 'codigo', 'status_ee', 'at_cliente.razao_social']
+            cols_falta = [c for c in cols_falta if c in df_falta.columns]
+            df_falta = df_falta[cols_falta].rename(columns={
                 'nome_completo': 'Profissional',
+                '_cpf_fmt': 'CPF',
                 '_data': 'Data',
                 'codigo': 'Código da escala',
                 'status_ee': 'Status',
