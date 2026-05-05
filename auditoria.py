@@ -450,18 +450,25 @@ def detectar_cpfs_invalidos(df):
  
  
 def detectar_pix_faltante(df, cadastro_df):
-    """Linhas sem PIX no relatório - tenta achar no cadastro."""
-    sem_pix = df[df['Chave PIX'].isna() | (df['Chave PIX'].astype(str).str.strip() == '')].copy()
-    if sem_pix.empty:
-        sem_pix['_pix_cadastro'] = None
-        sem_pix['_pix_tipo_cadastro'] = None
-        sem_pix['_pix_resolvido'] = False
-        return sem_pix
+    """
+    Detecta lançamentos cujo profissional NÃO tem PIX no cadastro
+    _EXT_ Profissional. O cadastro é a única fonte da verdade para PIX:
+    se o CPF não está lá (ou está mas sem PIX preenchido), aparece como
+    pendente para revisão manual.
+    """
+    # Procura no cadastro o PIX de cada CPF do relatório
+    pix_lookup = df['_cpf_digits'].apply(lambda c: lookup_pix_cadastro(c, cadastro_df))
+    pix_cad = pix_lookup.apply(lambda x: x[0])
+    tipo_cad = pix_lookup.apply(lambda x: x[1])
  
-    pix_lookup = sem_pix['_cpf_digits'].apply(lambda c: lookup_pix_cadastro(c, cadastro_df))
-    sem_pix['_pix_cadastro'] = pix_lookup.apply(lambda x: x[0])
-    sem_pix['_pix_tipo_cadastro'] = pix_lookup.apply(lambda x: x[1])
-    sem_pix['_pix_resolvido'] = sem_pix['_pix_cadastro'].notna()
+    # Faltante = CPF cujo cadastro não retornou PIX
+    mask_faltante = pix_cad.isna() | (pix_cad.astype(str).str.strip() == '')
+    sem_pix = df[mask_faltante].copy()
+    sem_pix['_pix_cadastro'] = pix_cad[mask_faltante]
+    sem_pix['_pix_tipo_cadastro'] = tipo_cad[mask_faltante]
+    # _pix_resolvido continua existindo (sempre False aqui) para
+    # compatibilidade com o app — o cadastro NÃO resolve esses casos.
+    sem_pix['_pix_resolvido'] = False
     return sem_pix
  
  
@@ -507,18 +514,17 @@ def montar_pagamentos(df_limpo, cadastro_df, semana_label, data_registro,
         tipo_despesa = str(r.get('Tipo de Despesa', '')).strip()
         categoria = CATEGORIA_MAP.get(tipo_despesa, tipo_despesa)
  
-        # Chave PIX: 1) override do usuário, 2) cadastro (se faltava), 3) original formatada
-        pix_original = r.get('Chave PIX')
-        tipo_pix = r.get('Tipo da Chave PIX')
+        # Chave PIX (prioridade):
+        #   1) override manual do usuário (aba "PIX faltante")
+        #   2) cadastro _EXT_ Profissional (única fonte da verdade)
+        #   Se não estiver no cadastro, deixa vazio — aparece como PIX faltante
+        #   na revisão e fica visível para o usuário decidir manualmente.
         idx = r['_idx']
         if idx in overrides_pix and overrides_pix[idx]:
             pix_final = overrides_pix[idx]
-        elif pd.isna(pix_original) or str(pix_original).strip() == '':
-            # buscar no cadastro
-            pix_cad, tipo_cad = lookup_pix_cadastro(r['_cpf_digits'], cadastro_df)
-            pix_final = pix_cad if pix_cad else ''
         else:
-            pix_final = formatar_pix(pix_original, tipo_pix)
+            pix_cad, _ = lookup_pix_cadastro(r['_cpf_digits'], cadastro_df)
+            pix_final = pix_cad if pix_cad else ''
  
         linhas.append({
             'Semanas': semana_label,
