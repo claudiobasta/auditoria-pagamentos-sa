@@ -181,8 +181,8 @@ if escala is not None:
         df_sem_dup_exatas, escala, data_ini_pgto, data_fim_pgto
     )
  
-pix_resolvidos_auto = int(sem_pix['_pix_resolvido'].sum()) if not sem_pix.empty else 0
-pix_nao_resolvidos = len(sem_pix) - pix_resolvidos_auto
+# Profissionais únicos sem PIX no cadastro (não conta o mesmo CPF múltiplas vezes)
+pix_profissionais_pendentes = sem_pix['_cpf_digits'].nunique() if not sem_pix.empty else 0
  
  
 # ============================================================
@@ -193,7 +193,7 @@ c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric('Lançamentos', len(df))
 c2.metric('Dup. exatas removidas', len(indices_dup_exatas))
 c3.metric('Suspeitas p/ revisar', len(suspeitas))
-c4.metric('Sem PIX (cadastro resolveu)', f'{pix_resolvidos_auto}/{len(sem_pix)}')
+c4.metric('Profissionais sem PIX no cadastro', pix_profissionais_pendentes)
 c5.metric('Valor total bruto', f'R$ {df["_valor_num"].sum():,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.'))
  
 st.divider()
@@ -213,7 +213,7 @@ else:
 tab1, tab2, tab3, tab4, tab_esc, tab5, tab6 = st.tabs([
     f'⚠️ Duplicatas suspeitas ({len(suspeitas)})',
     f'🆔 CPF ({len(invalidos)} inv. / {len(sem_cpf)} sem)',
-    f'🔑 PIX faltante ({pix_nao_resolvidos} pendentes)',
+    f'🔑 PIX faltante ({pix_profissionais_pendentes} profissionais)',
     f'📅 Sobreposição ({len(sobreposicao)})',
     label_escala,
     f'🚨 Outros alertas',
@@ -288,48 +288,45 @@ with tab2:
 # ----- ABA 3: PIX FALTANTE -----
 with tab3:
     if sem_pix.empty:
-        st.success('✅ Todos os lançamentos têm Chave PIX no relatório.')
+        st.success('✅ Todos os profissionais do relatório têm PIX cadastrado no _EXT_ Profissional.')
     else:
-        st.markdown(
-            f'**{pix_resolvidos_auto}** de {len(sem_pix)} resolvidos automaticamente pelo cadastro. '
-            f'Os demais precisam de PIX manual (ou serão exportados em branco).'
+        # Deduplicar por CPF: 1 linha por profissional (ele pode ter vários lançamentos)
+        sem_pix_unico = sem_pix.drop_duplicates(subset=['_cpf_digits']).copy()
+ 
+        st.warning(
+            f'**{len(sem_pix_unico)} profissional(is)** sem PIX no cadastro `_EXT_ Profissional`. '
+            f'Total de **{len(sem_pix)} lançamentos** afetados.'
+        )
+        st.caption(
+            '🔒 **Política**: o PIX vem exclusivamente do cadastro. Profissionais sem PIX cadastrado '
+            'precisam ser **adicionados ao `_EXT_ Profissional`** ou ter o PIX preenchido manualmente abaixo. '
+            'Sem preenchimento, o lançamento será exportado com PIX vazio.'
         )
  
-        # Resolvidos pelo cadastro
-        resolvidos = sem_pix[sem_pix['_pix_resolvido']]
-        if not resolvidos.empty:
-            with st.expander(f'✅ Resolvidos pelo cadastro ({len(resolvidos)})'):
-                st.dataframe(
-                    resolvidos[['Nome do profissional', '_cpf_fmt', '_pix_cadastro', '_pix_tipo_cadastro']],
-                    use_container_width=True, hide_index=True,
-                    column_config={
-                        '_cpf_fmt': 'CPF',
-                        '_pix_cadastro': 'PIX (cadastro)',
-                        '_pix_tipo_cadastro': 'Tipo',
-                    },
-                )
- 
-        # Não resolvidos - permitir override manual
-        nao_resolvidos = sem_pix[~sem_pix['_pix_resolvido']]
-        if not nao_resolvidos.empty:
-            st.markdown(f'**🔴 Sem PIX nem no relatório nem no cadastro ({len(nao_resolvidos)})**')
-            st.caption('Preencha manualmente abaixo (opcional). Sem preenchimento, vai vazio para o financeiro.')
-            for _, linha in nao_resolvidos.iterrows():
-                idx = linha['_idx']
-                cols = st.columns([3, 2, 3])
-                cols[0].write(f'**{linha["Nome do profissional"]}**')
-                cols[1].write(f'CPF: {linha["_cpf_fmt"]}')
-                pix_manual = cols[2].text_input(
-                    'PIX manual',
-                    value=st.session_state.overrides_pix.get(idx, ''),
-                    key=f'pix_man_{idx}',
-                    label_visibility='collapsed',
-                    placeholder='Cole a chave PIX aqui',
-                )
-                if pix_manual:
-                    st.session_state.overrides_pix[idx] = pix_manual
-                elif idx in st.session_state.overrides_pix:
-                    del st.session_state.overrides_pix[idx]
+        for _, linha in sem_pix_unico.iterrows():
+            idx = linha['_idx']
+            cols = st.columns([3, 2, 3])
+            cols[0].write(f'**{linha["Nome do profissional"]}**')
+            cols[1].write(f'CPF: {linha["_cpf_fmt"]}')
+            pix_manual = cols[2].text_input(
+                'PIX manual',
+                value=st.session_state.overrides_pix.get(idx, ''),
+                key=f'pix_man_{idx}',
+                label_visibility='collapsed',
+                placeholder='Cole a chave PIX aqui',
+            )
+            if pix_manual:
+                # Aplica o override em TODOS os lançamentos desse CPF, não só no idx atual
+                cpf = linha['_cpf_digits']
+                outros_idx = sem_pix[sem_pix['_cpf_digits'] == cpf]['_idx'].tolist()
+                for i in outros_idx:
+                    st.session_state.overrides_pix[i] = pix_manual
+            elif idx in st.session_state.overrides_pix:
+                # Remove de todos os lançamentos desse CPF
+                cpf = linha['_cpf_digits']
+                outros_idx = sem_pix[sem_pix['_cpf_digits'] == cpf]['_idx'].tolist()
+                for i in outros_idx:
+                    st.session_state.overrides_pix.pop(i, None)
  
 # ----- ABA 4: SOBREPOSIÇÃO -----
 with tab4:
@@ -500,10 +497,11 @@ c3.metric(
 )
  
 # Avisos antes de gerar
-if pix_nao_resolvidos > 0 and not st.session_state.overrides_pix:
+if pix_profissionais_pendentes > 0 and not st.session_state.overrides_pix:
     st.warning(
-        f'⚠️ Existem **{pix_nao_resolvidos}** lançamentos sem PIX que não foram preenchidos manualmente. '
-        'Eles serão exportados com PIX em branco. Volte na aba "PIX faltante" se quiser corrigir.'
+        f'⚠️ **{pix_profissionais_pendentes} profissional(is)** sem PIX no cadastro `_EXT_ Profissional`. '
+        'Os lançamentos serão exportados com PIX em branco. Volte na aba "PIX faltante" para preencher manualmente '
+        'ou cadastre os profissionais no `_EXT_ Profissional` antes de gerar.'
     )
  
 if st.button('✨ Gerar arquivo Pagamentos - Equipe Externa', type='primary', use_container_width=True):
