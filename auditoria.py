@@ -129,8 +129,12 @@ def normalizar_data(valor):
     Converte qualquer representação de data para um objeto datetime.date
     (sem hora, sem timezone). Retorna None se não for parseável.
  
-    Aceita: '25/04/2026', '2026-04-25T13:00:00.000Z', Timestamp(...),
-            datetime(...), '2026-04-25 09:30:00', None.
+    Aceita: '25/04/2026' (pt-BR dd/mm/yyyy), '2026-04-25T13:00:00.000Z',
+            Timestamp(...), datetime(...), '2026-04-25 09:30:00', None.
+ 
+    Regra de desambiguação importante: strings com '/' são SEMPRE tratadas
+    como pt-BR (dia/mês/ano). Isso evita o bug clássico de '09/05/2026'
+    ser lido como 5/setembro em vez de 9/maio.
     """
     if valor is None or (not isinstance(valor, str) and pd.isna(valor)):
         return None
@@ -140,11 +144,20 @@ def normalizar_data(valor):
         if valor.tzinfo is not None:
             valor = valor.tz_convert(None) if valor.tzinfo else valor.tz_localize(None)
         return valor.date()
-    # String: tentar com timezone primeiro (formato ISO UTC), depois dayfirst
+    # String
+    s = str(valor).strip()
+    if not s:
+        return None
     try:
-        ts = pd.to_datetime(valor, errors='coerce', utc=True)
+        # Heurística pt-BR: se tem '/' (formato BR), força dayfirst.
+        # Senão (ISO yyyy-mm-dd, com 'T', etc.), deixa o pandas inferir.
+        if '/' in s:
+            ts = pd.to_datetime(s, errors='coerce', dayfirst=True)
+        else:
+            ts = pd.to_datetime(s, errors='coerce', utc=True)
         if pd.isna(ts):
-            ts = pd.to_datetime(valor, errors='coerce', dayfirst=True)
+            # Último fallback
+            ts = pd.to_datetime(s, errors='coerce', dayfirst=True)
         if pd.isna(ts):
             return None
         if hasattr(ts, 'tz_localize') and ts.tzinfo is not None:
